@@ -16,8 +16,8 @@ jobs:
           profile: minimal
           toolchain: stable
       - uses: actions-rs/cargo@v1
-          with:
-            command: build
+        with:
+          command: build
 
   clippy:
     name: Clippy
