@@ -42,7 +42,7 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use deta::Deta;
     /// # fn main() -> deta::Result<()> {
     /// let deta = Deta::new()?;
@@ -69,7 +69,7 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```should_panic
     /// use deta::Deta;
     /// # fn main() -> deta::Result<()> {
     /// let key = "some key";
@@ -128,7 +128,7 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use deta::Deta;
     /// # fn main() -> deta::Result<()> {
     /// let deta = Deta::new()?;
@@ -160,18 +160,21 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use deta::{Deta, Item};
     /// # #[tokio::main]
     /// # async fn main() -> deta::Result<()> {
     /// let deta = Deta::new()?;
     ///
     /// let base = deta.base("main");
-    /// let item: Item<usize> = base.get("id").await?;
+    /// base.put(Item::new_with_key("get_id", 60)).await?;
+    /// let value: usize = base.get("get_id").await?;
+    ///
+    /// assert_eq!(value, 60);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn get<T>(&self, key: impl fmt::Display) -> Result<Item<T>>
+    pub async fn get<T>(&self, key: impl fmt::Display) -> Result<T>
     where
         T: DeserializeOwned,
     {
@@ -182,7 +185,8 @@ impl Deta {
             key
         );
 
-        self.client
+        let mut value: serde_json::Value = self
+            .client
             .get(&url)
             .send()
             .await
@@ -191,7 +195,24 @@ impl Deta {
             .map_err(|_| Error::ItemNotFound)?
             .json()
             .await
-            .map_err(|_| Error::JSONDeserializingFailed)
+            .map_err(|_| Error::JSONDeserializingFailed)?;
+
+        let len = value
+            .as_object()
+            .ok_or(Error::JSONDeserializingFailed)?
+            .len();
+
+        if len == 2 {
+            serde_json::from_value(value["value"].take())
+                .map_err(|_| Error::JSONDeserializingFailed)
+        } else {
+            value
+                .as_object_mut()
+                .ok_or(Error::JSONDeserializingFailed)?
+                .remove("key")
+                .ok_or(Error::JSONDeserializingFailed)?;
+            serde_json::from_value(value).map_err(|_| Error::JSONDeserializingFailed)
+        }
     }
 
     /// Delete a stored item.
@@ -207,14 +228,18 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
-    /// use deta::Deta;
+    /// ```
+    /// use deta::{Deta, Item, Result};
     /// # #[tokio::main]
-    /// # async fn main() -> deta::Result<()> {
+    /// # async fn main() -> Result<()> {
     /// let deta = Deta::new()?;
     ///
     /// let base = deta.base("main");
-    /// base.delete("id").await?;
+    /// base.put(Item::new_with_key("delete_id", 60)).await?;
+    /// base.delete("delete_id").await?;
+    ///
+    /// let item: Result<usize> = base.get("delete_id").await;
+    /// assert!(item.is_err());
     /// # Ok(())
     /// # }
     /// ```
@@ -235,6 +260,84 @@ impl Deta {
         Ok(())
     }
 
+    /// Stores an item.
+    /// This request overwrites an item if the key already exists.
+    ///
+    /// Returns the key, if successful.
+    ///
+    /// # Arguments
+    ///
+    /// * `item`: An `Item`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::BaseNameNotPresent`](crate::Error::BaseNameNotPresent)
+    /// * [`Error::JSONSerializingFailed`](crate::Error::JSONSerializingFailed)
+    /// * [`Error::RequestSendError`](crate::Error::RequestSendError)
+    /// * [`Error::BadRequest`](crate::Error::BadRequest)
+    /// * [`Error::JSONDeserializingFailed`](crate::Error::JSONDeserializingFailed)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use deta::{Deta, Item};
+    /// # #[tokio::main]
+    /// # async fn main() -> deta::Result<()> {
+    /// let deta = Deta::new()?;
+    ///
+    /// let base = deta.base("main");
+    /// # base.delete(5);
+    /// let item = Item::new_with_key("put_id", 5);
+    /// assert_eq!(base.put(item).await?, "put_id");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn put<T>(&self, item: Item<T>) -> Result<String>
+    where
+        T: Serialize,
+    {
+        let url = format!(
+            "{}/{}/items",
+            self.url,
+            self.base_name.as_ref().ok_or(Error::BaseNameNotPresent)?,
+        );
+
+        let Item { key, value } = item;
+        let mut value = serde_json::to_value(value).map_err(|_| Error::JSONSerializingFailed)?;
+
+        if !value.is_object() {
+            value = serde_json::json!({ "value": value });
+        }
+
+        if let Some(x) = key {
+            value["key"] = serde_json::json!(x);
+        }
+
+        let req_body = serde_json::json!({ "items": [value] });
+
+        let value: serde_json::Value = self
+            .client
+            .put(&url)
+            .json(&req_body)
+            .send()
+            .await
+            .map_err(|_| Error::RequestSendError)?
+            .error_for_status()
+            .map_err(|_| Error::BadRequest)?
+            .json()
+            .await
+            .map_err(|_| Error::JSONDeserializingFailed)?;
+
+        let key = value["processed"]["items"]
+            .as_array()
+            .ok_or(Error::JSONDeserializingFailed)?[0]["key"]
+            .as_str()
+            .ok_or(Error::JSONDeserializingFailed)?
+            .to_string();
+
+        Ok(key)
+    }
+
     /// Stores multiple items in a single request.
     /// This request overwrites an item if the key already exists.
     ///
@@ -253,7 +356,7 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use deta::{Deta, Item};
     /// # #[tokio::main]
     /// # async fn main() -> deta::Result<()> {
@@ -266,22 +369,50 @@ impl Deta {
     ///     .enumerate()
     ///     .map(|(c, x)| Item::new_with_key(c, x))
     ///     .collect::<Vec<_>>();
-    /// let (processed, failed): (Vec<Item<String>>, Vec<Item<String>>) = base.put(vec).await?;
+    /// let (processed, failed): (Vec<Item<String>>, Vec<Item<String>>) = base.put_many(vec).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn put<T, U>(&self, items: Vec<Item<T>>) -> Result<(Vec<Item<U>>, Vec<Item<U>>)>
+    pub async fn put_many<T, U>(&self, items: Vec<Item<T>>) -> Result<(Vec<Item<U>>, Vec<Item<U>>)>
     where
         T: Serialize,
         U: DeserializeOwned,
     {
+        if items.len() > 25 {
+            return Err(Error::VecTooLong);
+        }
+
         let url = format!(
             "{}/{}/items",
             self.url,
             self.base_name.as_ref().ok_or(Error::BaseNameNotPresent)?,
         );
 
-        let req_body = Put { items };
+        let items: Result<Vec<_>> = items
+            .into_iter()
+            .map(|x| {
+                let Item { key, value } = x;
+                let value = serde_json::to_value(value);
+
+                if let Ok(mut value) = value {
+                    if !value.is_object() {
+                        value = serde_json::json!({ "value": value });
+                    }
+
+                    if let Some(x) = key {
+                        value["key"] = serde_json::json!(x);
+                    }
+
+                    Ok(value)
+                } else {
+                    Err(Error::JSONSerializingFailed)
+                }
+            })
+            .collect();
+
+        let items = items?;
+
+        let req_body = serde_json::json!({ "items": items });
 
         let PutResult { processed, failed }: PutResult<U> = self
             .client
@@ -295,6 +426,9 @@ impl Deta {
             .json()
             .await
             .map_err(|_| Error::JSONDeserializingFailed)?;
+
+        let processed = processed.unwrap_or(Put { items: Vec::new() });
+        let failed = failed.unwrap_or(Put { items: Vec::new() });
 
         let Put { items: processed } = processed;
         let Put { items: failed } = failed;
@@ -313,6 +447,7 @@ impl Deta {
     /// # Errors
     ///
     /// * [`Error::BaseNameNotPresent`](crate::Error::BaseNameNotPresent)
+    /// * [`Error::JSONSerializingFailed`](crate::Error::JSONSerializingFailed)
     /// * [`Error::RequestSendError`](crate::Error::RequestSendError)
     /// * [`Error::KeyConflict`](crate::Error::KeyConflict)
     /// * [`Error::BadRequest`](crate::Error::BadRequest)
@@ -321,14 +456,15 @@ impl Deta {
     ///
     /// # Examples
     ///
-    /// ```no_run
+    /// ```
     /// use deta::{Deta, Item};
     /// # #[tokio::main]
     /// # async fn main() -> deta::Result<()> {
     /// let deta = Deta::new()?;
     ///
     /// let base = deta.base("main");
-    /// let item = Item::new_with_key(5, "five");
+    /// # base.delete("insert_id").await?;
+    /// let item = Item::new_with_key("insert_id", 60);
     /// base.insert(item).await?;
     /// # Ok(())
     /// # }
@@ -343,7 +479,18 @@ impl Deta {
             self.base_name.as_ref().ok_or(Error::BaseNameNotPresent)?,
         );
 
-        let req_body = Insert { item };
+        let Item { key, value } = item;
+        let mut value = serde_json::to_value(value).map_err(|_| Error::JSONSerializingFailed)?;
+
+        if !value.is_object() {
+            value = serde_json::json!({ "value": value });
+        }
+
+        if let Some(x) = key {
+            value["key"] = serde_json::json!(x);
+        }
+
+        let req_body = serde_json::json!({ "item": value });
 
         let json: serde_json::Value = self
             .client
@@ -439,17 +586,12 @@ impl Deta {
 }
 
 #[derive(Serialize, Deserialize)]
-struct Insert<T> {
-    item: Item<T>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct Put<T> {
     items: Vec<Item<T>>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PutResult<T> {
-    processed: Put<T>,
-    failed: Put<T>,
+    processed: Option<Put<T>>,
+    failed: Option<Put<T>>,
 }

@@ -28,6 +28,12 @@ pub enum Error {
     #[error("base name not present")]
     BaseNameNotPresent,
 
+    /// The length of the vector is too long.
+    ///
+    /// There can't be more than 25 items at a time.
+    #[error("vec length too long")]
+    VecTooLong,
+
     /// Error occurred while sending a request.
     ///
     /// Check your network connectivity.
@@ -61,6 +67,12 @@ pub enum Error {
     /// The server didn't return the expected response.
     #[error("server error")]
     ServerError,
+
+    /// Serializing to JSON failed.
+    ///
+    /// The request didn't successfully serialize to JSON.
+    #[error("JSON serializing failed")]
+    JSONSerializingFailed,
 
     /// Deserializing to JSON failed.
     ///
